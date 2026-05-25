@@ -1,0 +1,423 @@
+import Database from 'better-sqlite3';
+import path from 'node:path';
+import fs from 'node:fs';
+import {
+  type IndexedFile,
+  type IndexedFunction,
+  type IndexedClass,
+  type IndexedType,
+  type Relationship,
+  type FeedbackEntry,
+} from './types.js';
+
+export class Storage {
+  private db: Database.Database;
+  private initialized = false;
+
+  constructor(private repoDir: string) {
+    const dbDir = path.join(repoDir, '.contextbridge');
+    fs.mkdirSync(dbDir, { recursive: true });
+    const dbPath = path.join(dbDir, 'contextbridge.db');
+    this.db = new Database(dbPath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+  }
+
+  initialize(): void {
+    if (this.initialized) return;
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS files (
+        id TEXT PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        language TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        token_count INTEGER DEFAULT 0,
+        is_test INTEGER DEFAULT 0,
+        last_indexed_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS functions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        signature TEXT,
+        doc_comment TEXT,
+        complexity INTEGER DEFAULT 0,
+        start_line INTEGER NOT NULL,
+        end_line INTEGER NOT NULL,
+        is_exported INTEGER DEFAULT 0,
+        is_async INTEGER DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS classes (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        methods TEXT DEFAULT '[]',
+        properties TEXT DEFAULT '[]',
+        extends_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+        implements_ids TEXT DEFAULT '[]',
+        is_exported INTEGER DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS types (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('interface', 'type', 'enum', 'type-alias')),
+        file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        properties TEXT DEFAULT '[]'
+      );
+
+      CREATE TABLE IF NOT EXISTS relationships (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        relation_type TEXT NOT NULL CHECK(relation_type IN ('calls', 'imports', 'extends', 'implements', 'uses_type', 'has_function', 'has_test')),
+        metadata TEXT DEFAULT '{}',
+        FOREIGN KEY (source_id) REFERENCES files(id) ON DELETE CASCADE,
+        FOREIGN KEY (target_id) REFERENCES files(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS feedback (
+        id TEXT PRIMARY KEY,
+        query TEXT NOT NULL,
+        context_id TEXT NOT NULL,
+        rating INTEGER NOT NULL CHECK(rating >= 1 AND rating <= 5),
+        accepted_items TEXT DEFAULT '[]',
+        rejected_items TEXT DEFAULT '[]',
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_functions_file ON functions(file_id);
+      CREATE INDEX IF NOT EXISTS idx_classes_file ON classes(file_id);
+      CREATE INDEX IF NOT EXISTS idx_types_file ON types(file_id);
+      CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_id);
+      CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_id);
+      CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(relation_type);
+      CREATE INDEX IF NOT EXISTS idx_feedback_context ON feedback(context_id);
+    `);
+
+    this.initialized = true;
+  }
+
+  // ─── File Operations ─────────────────────────────────────
+
+  upsertFile(file: Omit<IndexedFile, 'id'> & { id?: string }): string {
+    const id = file.id || file.path;
+    const stmt = this.db.prepare(`
+      INSERT INTO files (id, path, language, content_hash, token_count, is_test, last_indexed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(path) DO UPDATE SET
+        content_hash = excluded.content_hash,
+        token_count = excluded.token_count,
+        is_test = excluded.is_test,
+        last_indexed_at = excluded.last_indexed_at
+    `);
+    stmt.run(
+      id,
+      file.path,
+      file.language,
+      file.contentHash,
+      file.tokenCount,
+      file.isTest ? 1 : 0,
+      file.lastIndexedAt,
+    );
+    return id;
+  }
+
+  getFileByPath(filePath: string): IndexedFile | null {
+    const row = this.db
+      .prepare('SELECT * FROM files WHERE path = ?')
+      .get(filePath) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.rowToFile(row);
+  }
+
+  getAllFiles(): IndexedFile[] {
+    const rows = this.db.prepare('SELECT * FROM files').all() as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFile(r));
+  }
+
+  deleteFile(fileId: string): void {
+    this.db.prepare('DELETE FROM files WHERE id = ?').run(fileId);
+  }
+
+  // ─── Function Operations ─────────────────────────────────
+
+  upsertFunction(fn: Omit<IndexedFunction, 'id'> & { id?: string }): string {
+    const id = fn.id || `${fn.fileId}:${fn.fullName}`;
+    this.db
+      .prepare(
+        `
+      INSERT INTO functions (id, name, full_name, file_id, signature, doc_comment, complexity, start_line, end_line, is_exported, is_async)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        signature = excluded.signature,
+        doc_comment = excluded.doc_comment,
+        complexity = excluded.complexity,
+        start_line = excluded.start_line,
+        end_line = excluded.end_line,
+        is_exported = excluded.is_exported,
+        is_async = excluded.is_async
+    `,
+      )
+      .run(
+        id,
+        fn.name,
+        fn.fullName,
+        fn.fileId,
+        fn.signature,
+        fn.docComment,
+        fn.complexity,
+        fn.startLine,
+        fn.endLine,
+        fn.isExported ? 1 : 0,
+        fn.isAsync ? 1 : 0,
+      );
+    return id;
+  }
+
+  getFunctionsByFile(fileId: string): IndexedFunction[] {
+    const rows = this.db
+      .prepare('SELECT * FROM functions WHERE file_id = ?')
+      .all(fileId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFunction(r));
+  }
+
+  getAllFunctions(): IndexedFunction[] {
+    const rows = this.db.prepare('SELECT * FROM functions').all() as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFunction(r));
+  }
+
+  // ─── Class Operations ────────────────────────────────────
+
+  upsertClass(cls: Omit<IndexedClass, 'id'> & { id?: string }): string {
+    const id = cls.id || `${cls.fileId}:${cls.name}`;
+    this.db
+      .prepare(
+        `
+      INSERT INTO classes (id, name, file_id, methods, properties, extends_id, implements_ids, is_exported)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        methods = excluded.methods,
+        properties = excluded.properties,
+        extends_id = excluded.extends_id,
+        implements_ids = excluded.implements_ids,
+        is_exported = excluded.is_exported
+    `,
+      )
+      .run(id, cls.name, cls.fileId, JSON.stringify(cls.methods), JSON.stringify(cls.properties), cls.extendsId, JSON.stringify(cls.implementsIds), cls.isExported ? 1 : 0);
+    return id;
+  }
+
+  getClassesByFile(fileId: string): IndexedClass[] {
+    const rows = this.db
+      .prepare('SELECT * FROM classes WHERE file_id = ?')
+      .all(fileId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToClass(r));
+  }
+
+  // ─── Type Operations ─────────────────────────────────────
+
+  upsertType(t: Omit<IndexedType, 'id'> & { id?: string }): string {
+    const id = t.id || `${t.fileId}:${t.name}`;
+    this.db
+      .prepare(
+        `
+      INSERT INTO types (id, name, kind, file_id, properties)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        kind = excluded.kind,
+        properties = excluded.properties
+    `,
+      )
+      .run(id, t.name, t.kind, t.fileId, JSON.stringify(t.properties));
+    return id;
+  }
+
+  getTypesByFile(fileId: string): IndexedType[] {
+    const rows = this.db
+      .prepare('SELECT * FROM types WHERE file_id = ?')
+      .all(fileId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToType(r));
+  }
+
+  // ─── Relationship Operations ─────────────────────────────
+
+  upsertRelationship(rel: Omit<Relationship, 'id'> & { id?: string }): string {
+    const id = rel.id || `${rel.sourceId}:${rel.relationType}:${rel.targetId}`;
+    this.db
+      .prepare(
+        `
+      INSERT INTO relationships (id, source_id, target_id, relation_type, metadata)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        metadata = excluded.metadata
+    `,
+      )
+      .run(id, rel.sourceId, rel.targetId, rel.relationType, JSON.stringify(rel.metadata));
+    return id;
+  }
+
+  getRelationshipsForFile(fileId: string): Relationship[] {
+    const rows = this.db
+      .prepare('SELECT * FROM relationships WHERE source_id = ? OR target_id = ?')
+      .all(fileId, fileId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToRelationship(r));
+  }
+
+  // ─── Feedback Operations ─────────────────────────────────
+
+  insertFeedback(feedback: Omit<FeedbackEntry, 'id' | 'createdAt'> & { id?: string }): string {
+    const id = feedback.id || crypto.randomUUID();
+    this.db
+      .prepare(
+        `
+      INSERT INTO feedback (id, query, context_id, rating, accepted_items, rejected_items, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+      )
+      .run(
+        id,
+        feedback.query,
+        feedback.contextId,
+        feedback.rating,
+        JSON.stringify(feedback.acceptedItems),
+        JSON.stringify(feedback.rejectedItems),
+        new Date().toISOString(),
+      );
+    return id;
+  }
+
+  getFeedbackForContext(contextId: string): FeedbackEntry[] {
+    const rows = this.db
+      .prepare('SELECT * FROM feedback WHERE context_id = ? ORDER BY created_at DESC')
+      .all(contextId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFeedback(r));
+  }
+
+  // ─── Search ──────────────────────────────────────────────
+
+  searchFunctions(query: string, limit = 20): IndexedFunction[] {
+    // Simple LIKE-based search for MVP (we'll add vector search later)
+    const rows = this.db
+      .prepare(
+        `
+      SELECT * FROM functions
+      WHERE name LIKE ? OR full_name LIKE ? OR doc_comment LIKE ?
+      LIMIT ?
+    `,
+      )
+      .all(`%${query}%`, `%${query}%`, `%${query}%`, limit) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFunction(r));
+  }
+
+  searchFiles(query: string, limit = 20): IndexedFile[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT * FROM files WHERE path LIKE ? LIMIT ?
+    `,
+      )
+      .all(`%${query}%`, limit) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFile(r));
+  }
+
+  // ─── Stats ───────────────────────────────────────────────
+
+  getStats(): { fileCount: number; functionCount: number; classCount: number; typeCount: number } {
+    const fileCount = (this.db.prepare('SELECT COUNT(*) as count FROM files').get() as { count: number }).count;
+    const functionCount = (
+      this.db.prepare('SELECT COUNT(*) as count FROM functions').get() as { count: number }
+    ).count;
+    const classCount = (this.db.prepare('SELECT COUNT(*) as count FROM classes').get() as { count: number }).count;
+    const typeCount = (this.db.prepare('SELECT COUNT(*) as count FROM types').get() as { count: number }).count;
+    return { fileCount, functionCount, classCount, typeCount };
+  }
+
+  // ─── Close ───────────────────────────────────────────────
+
+  close(): void {
+    this.db.close();
+  }
+
+  // ─── Row Mappers ─────────────────────────────────────────
+
+  private rowToFile(row: Record<string, unknown>): IndexedFile {
+    return {
+      id: row.id as string,
+      path: row.path as string,
+      language: row.language as string,
+      contentHash: row.content_hash as string,
+      tokenCount: row.token_count as number,
+      isTest: Boolean(row.is_test),
+      lastIndexedAt: row.last_indexed_at as string,
+    };
+  }
+
+  private rowToFunction(row: Record<string, unknown>): IndexedFunction {
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      fullName: row.full_name as string,
+      fileId: row.file_id as string,
+      signature: (row.signature as string) || '',
+      docComment: (row.doc_comment as string) || '',
+      complexity: row.complexity as number,
+      startLine: row.start_line as number,
+      endLine: row.end_line as number,
+      isExported: Boolean(row.is_exported),
+      isAsync: Boolean(row.is_async),
+    };
+  }
+
+  private rowToClass(row: Record<string, unknown>): IndexedClass {
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      fileId: row.file_id as string,
+      methods: JSON.parse((row.methods as string) || '[]'),
+      properties: JSON.parse((row.properties as string) || '[]'),
+      extendsId: row.extends_id as string | null,
+      implementsIds: JSON.parse((row.implements_ids as string) || '[]'),
+      isExported: Boolean(row.is_exported),
+    };
+  }
+
+  private rowToType(row: Record<string, unknown>): IndexedType {
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      kind: row.kind as IndexedType['kind'],
+      fileId: row.file_id as string,
+      properties: JSON.parse((row.properties as string) || '[]'),
+    };
+  }
+
+  private rowToRelationship(row: Record<string, unknown>): Relationship {
+    return {
+      id: row.id as string,
+      sourceId: row.source_id as string,
+      targetId: row.target_id as string,
+      relationType: row.relation_type as Relationship['relationType'],
+      metadata: JSON.parse((row.metadata as string) || '{}'),
+    };
+  }
+
+  private rowToFeedback(row: Record<string, unknown>): FeedbackEntry {
+    return {
+      id: row.id as string,
+      query: row.query as string,
+      contextId: row.context_id as string,
+      rating: row.rating as FeedbackEntry['rating'],
+      acceptedItems: JSON.parse((row.accepted_items as string) || '[]'),
+      rejectedItems: JSON.parse((row.rejected_items as string) || '[]'),
+      createdAt: row.created_at as string,
+    };
+  }
+}
