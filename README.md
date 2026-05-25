@@ -39,7 +39,18 @@ cd your-project
 cb init
 ```
 
-This scans your codebase, parses TypeScript/JavaScript files, and builds a local index in `.contextbridge/`.
+Scans your codebase, parses TypeScript/JavaScript files, and builds a local index in `.contextbridge/`.
+
+```
+$ cb init
+🔍 ContextBridge — Indexing repository...
+  Directory: /Users/you/your-project
+
+✓ Indexed 14 files
+  • 67 functions indexed
+  • 5 classes indexed
+  • 14 types indexed
+✓ Index complete (2.3s)
 
 ### Get context for a task
 
@@ -47,6 +58,24 @@ This scans your codebase, parses TypeScript/JavaScript files, and builds a local
 cb context "How does the payment flow work?"
 cb context "Explain the authentication architecture" --format prompt
 ```
+
+```
+$ cb context "What does the context engine do?"
+📦 Context: What does the context engine do?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 Summary: The ContextEngine class manages context retrieval and synthesis.
+
+📋 packages/core/src/context-engine.ts
+  • getContext - Main entry point for context retrieval
+  • getFileContext - Get context about a specific file
+  • recordFeedback - Record feedback for learning
+  • buildFunctionSection - Build a section from function matches
+  • buildSummary - Synthesize a summary from matched sections
+
+📋 packages/core/src/__tests__/context-engine.test.ts (test file)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ 3 relevant sections found
 
 ### Interactive mode
 
@@ -60,6 +89,17 @@ cb> How do we handle error states?
 ```bash
 cb status
 ```
+
+```
+$ cb status
+📊 ContextBridge Index Status
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Files:      14
+  Functions:  67
+  Classes:    5
+  Types:      14
+  DB Size:    108.0 KB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ### MCP Server (for AI tool integration)
 
@@ -174,13 +214,16 @@ contextbridge/
 - [ ] Full Knowledge Graph (Neo4j)
 - [ ] Convention detection and architectural inference
 - [ ] Web UI dashboard
-- [ ] Git integration (`cb what-changed`)
+- [x] Git integration (`cb what-changed`)
+- [x] Comprehensive test suite (30+ tests)
+- [x] Keyword-based context search (improved relevance)
 
 ### Phase 3 (Future)
 - [ ] Cloud sync & team workspaces
 - [ ] IDE extensions (VS Code, JetBrains)
 - [ ] Integration bus (Slack, Notion, Jira, Linear)
 - [ ] Enterprise features (SSO, audit, RBAC)
+- [ ] File watching for auto re-indexing
 
 ## License
 

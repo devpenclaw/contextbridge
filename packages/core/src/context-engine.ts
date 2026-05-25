@@ -283,23 +283,48 @@ export class ContextEngine {
   }
 
   private calculateMatchScore(fn: IndexedFunction, query: string): number {
-    const lowercase = query.toLowerCase();
-    let score = 0;
+    const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+      'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+      'can', 'shall', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into',
+      'through', 'during', 'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+      'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how',
+      'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
+      'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'what', 'which', 'who']);
 
-    // Name match is strongest
-    if (fn.name.toLowerCase().includes(lowercase)) score += 0.8;
-    if (fn.fullName.toLowerCase().includes(lowercase)) score += 0.6;
+    const keywords = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((k) => k.length > 1 && !stopWords.has(k));
 
-    // Doc comment match
-    if (fn.docComment.toLowerCase().includes(lowercase)) score += 0.3;
+    if (keywords.length === 0) return 0.1;
 
-    // Signature match
-    if (fn.signature.toLowerCase().includes(lowercase)) score += 0.2;
+    const fnName = fn.name.toLowerCase();
+    const fnFullName = fn.fullName.toLowerCase();
+    const fnDoc = fn.docComment.toLowerCase();
+    const fnSig = fn.signature.toLowerCase();
 
-    // Exported functions are more relevant
-    if (fn.isExported) score += 0.1;
+    let matchedKeywords = 0;
 
-    return Math.min(score, 1);
+    for (const keyword of keywords) {
+      // Name match is strongest
+      if (fnName.includes(keyword)) matchedKeywords += 3;
+      else if (fnFullName.includes(keyword)) matchedKeywords += 2;
+
+      // Doc comment match
+      if (fnDoc.includes(keyword)) matchedKeywords += 1;
+
+      // Signature match
+      if (fnSig.includes(keyword)) matchedKeywords += 0.5;
+    }
+
+    // Normalize: max possible is keywords.length * 3 (all keywords match name)
+    const maxScore = keywords.length * 3;
+    const score = matchedKeywords / maxScore;
+
+    // Boost exported functions
+    const exportBonus = fn.isExported ? 0.1 : 0;
+
+    return Math.min(score + exportBonus, 1);
   }
 
   private estimateTokens(text: string): number {

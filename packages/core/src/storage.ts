@@ -304,27 +304,70 @@ export class Storage {
   // ─── Search ──────────────────────────────────────────────
 
   searchFunctions(query: string, limit = 20): IndexedFunction[] {
-    // Simple LIKE-based search for MVP (we'll add vector search later)
+    // Extract meaningful keywords (skip common stop words)
+    const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+      'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+      'can', 'shall', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into',
+      'through', 'during', 'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+      'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how',
+      'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
+      'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'what', 'which', 'who']);
+
+    const keywords = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((k) => k.length > 1 && !stopWords.has(k));
+
+    if (keywords.length === 0) {
+      // Fallback: search the whole query
+      return this.searchFunctionsFullQuery(query, limit);
+    }
+
+    // Build a query that matches ANY keyword across name, full_name, or doc_comment
+    const conditions = keywords.map(() => '(name LIKE ? OR full_name LIKE ? OR doc_comment LIKE ?)').join(' OR ');
+    const params = keywords.flatMap((k) => [`%${k}%`, `%${k}%`, `%${k}%`]);
+    params.push(String(limit));
+
+    const sql = `SELECT * FROM functions WHERE ${conditions} LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFunction(r));
+  }
+
+  private searchFunctionsFullQuery(query: string, limit = 20): IndexedFunction[] {
     const rows = this.db
-      .prepare(
-        `
-      SELECT * FROM functions
-      WHERE name LIKE ? OR full_name LIKE ? OR doc_comment LIKE ?
-      LIMIT ?
-    `,
-      )
+      .prepare('SELECT * FROM functions WHERE name LIKE ? OR full_name LIKE ? OR doc_comment LIKE ? LIMIT ?')
       .all(`%${query}%`, `%${query}%`, `%${query}%`, limit) as Record<string, unknown>[];
     return rows.map((r) => this.rowToFunction(r));
   }
 
   searchFiles(query: string, limit = 20): IndexedFile[] {
-    const rows = this.db
-      .prepare(
-        `
-      SELECT * FROM files WHERE path LIKE ? LIMIT ?
-    `,
-      )
-      .all(`%${query}%`, limit) as Record<string, unknown>[];
+    // Same keyword extraction for file search
+    const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+      'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+      'can', 'shall', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into',
+      'through', 'during', 'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+      'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how',
+      'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
+      'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'what', 'which', 'who']);
+
+    const keywords = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((k) => k.length > 1 && !stopWords.has(k));
+
+    if (keywords.length === 0) {
+      const rows = this.db
+        .prepare('SELECT * FROM files WHERE path LIKE ? LIMIT ?')
+        .all(`%${query}%`, limit) as Record<string, unknown>[];
+      return rows.map((r) => this.rowToFile(r));
+    }
+
+    const conditions = keywords.map(() => 'path LIKE ?').join(' OR ');
+    const params = keywords.map((k) => `%${k}%`);
+    params.push(String(limit));
+
+    const sql = `SELECT * FROM files WHERE ${conditions} LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
     return rows.map((r) => this.rowToFile(r));
   }
 

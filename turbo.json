@@ -9,7 +9,10 @@
       "cache": false,
       "persistent": true
     },
-    "test": {},
+    "test": {
+      "dependsOn": ["build"],
+      "outputs": []
+    },
     "lint": {},
     "typecheck": {},
     "clean": {

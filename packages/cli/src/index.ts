@@ -6,6 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import chalk from 'chalk';
 import { createInterface } from 'node:readline/promises';
+import { execSync } from 'node:child_process';
 
 const program = new Command();
 
@@ -149,6 +150,95 @@ program
       bridge.close();
       console.log(chalk.gray('\nGoodbye!'));
     }
+  });
+
+// ─── What Changed Command ─────────────────────────────────
+
+program
+  .command('what-changed')
+  .description('Show recent git changes with context from the index')
+  .option('-d, --days <days>', 'Number of days to look back', '7')
+  .option('-n, --count <count>', 'Number of commits to show', '10')
+  .action(async (options) => {
+    const repoDir = process.cwd();
+    const days = parseInt(options.days, 10);
+    const count = parseInt(options.count, 10);
+
+    // Check if we're in a git repo
+    let isGit = false;
+    try {
+      isGit = execSync('git rev-parse --is-inside-work-tree', { encoding: 'utf-8', stdio: 'pipe' }).trim() === 'true';
+    } catch {
+      isGit = false;
+    }
+
+    if (!isGit) {
+      console.log(chalk.red('❌ Not a git repository.'));
+      process.exit(1);
+    }
+
+    console.log(chalk.blue(`\n📜 Recent Changes (last ${days} days)\n`));
+
+    // Get git log
+    const logCommand = `git log --oneline --since="${days}.days.ago" --max-count=${count}`;
+    const logOutput = execSync(logCommand, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+
+    if (!logOutput) {
+      console.log(chalk.yellow('  No changes found in the last ' + days + ' days.'));
+      return;
+    }
+
+    console.log(logOutput);
+    console.log();
+
+    // Get detailed diff stat
+    const statCommand = `git diff --stat $(git rev-list --max-parents=0 HEAD)..HEAD --since="${days}.days.ago" 2>/dev/null || git diff --stat HEAD~${Math.min(count, 20)}..HEAD`;
+    try {
+      const statOutput = execSync(statCommand, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+      if (statOutput) {
+        console.log(chalk.cyan('  Files changed:'));
+        const lines = statOutput.split('\n').slice(-20);
+        for (const line of lines) {
+          console.log(`  ${line}`);
+        }
+      }
+    } catch {
+      // Diff stat is best-effort
+    }
+
+    // Try to find relevant context from the index for changed files
+    const dbPath = path.join(repoDir, '.contextbridge', 'contextbridge.db');
+    if (fs.existsSync(dbPath)) {
+      console.log(chalk.cyan('\n  🔗 Cross-referencing with index...'));
+      const bridge = new ContextBridge({ repoDir });
+      bridge.initialize();
+
+      // Get changed file paths
+      try {
+        const changedFilesCommand = `git diff --name-only $(git rev-list --max-parents=0 HEAD)..HEAD --since="${days}.days.ago" 2>/dev/null | head -10`;
+        const changedFiles = execSync(changedFilesCommand, { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n').filter(Boolean);
+
+        for (const file of changedFiles.slice(0, 5)) {
+          if (file.match(/\.(ts|tsx|js|jsx)$/)) {
+            try {
+              const ctx = bridge.getFileContext(file);
+              if (ctx && ctx.sections.length > 0) {
+                const contentLength = ctx.sections[0].content.length;
+                console.log(chalk.gray(`  📄 ${file}: ${contentLength} chars of context`));
+              }
+            } catch {
+              // File might not be in index
+            }
+          }
+        }
+      } catch {
+        // Best effort
+      }
+
+      bridge.close();
+    }
+
+    console.log(chalk.gray(`\n  Run \`cb context\` with a specific query to dive deeper.`));
   });
 
 // ─── Status Command ────────────────────────────────────────
